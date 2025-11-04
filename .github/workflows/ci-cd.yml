@@ -1,0 +1,122 @@
+name: Java CI/CD - SonarQube, Nexus, Tomcat
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      NEXUS_URL: http://18.226.34.227:8081
+      NEXUS_REPO: maven-releases
+      NEXUS_GROUP: com/web/cal
+      NEXUS_ARTIFACT: webapp-add
+      TOMCAT_URL: http://18.216.0.11:8080/manager/text
+
+    steps:
+
+    # 1️⃣ Checkout Code
+    - name: 📦 Checkout Code
+      uses: actions/checkout@v4
+
+    # 2️⃣ Set up JDK & Maven
+    - name: ☕ Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: 🧰 Set up Maven Cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+        restore-keys: |
+          ${{ runner.os }}-maven-
+
+    # 3️⃣ Run SonarQube Analysis
+    - name: 🔍 SonarQube Code Analysis
+      run: |
+        mvn clean verify sonar:sonar \
+          -DskipTests \
+          -Dsonar.projectKey=JavaWebCalculator \
+          -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+          -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+    # 4️⃣ Build WAR Artifact
+    - name: ⚙️ Build WAR File
+      run: |
+        mvn clean package -DskipTests
+        echo "✅ Build completed!"
+        ls -lh target/*.war
+
+    # 5️⃣ Upload WAR to Nexus via REST API
+    - name: ⬆️ Upload Artifact to Nexus
+      env:
+        NEXUS_USER: ${{ secrets.NEXUS_USER }}
+        NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
+      run: |
+        set -e
+        WAR_FILE=$(ls target/*.war | head -1)
+        FILE_NAME=$(basename "$WAR_FILE")
+        VERSION="0.0.${{ github.run_number }}"
+
+        echo "📤 Uploading $FILE_NAME to Nexus as version $VERSION..."
+
+        curl -v -u ${NEXUS_USER}:${NEXUS_PASS} --upload-file "$WAR_FILE" \
+          "${{ env.NEXUS_URL }}/repository/${{ env.NEXUS_REPO }}/${{ env.NEXUS_GROUP }}/${{ env.NEXUS_ARTIFACT }}/${VERSION}/${{ env.NEXUS_ARTIFACT }}-${VERSION}.war"
+
+        echo "✅ Artifact uploaded successfully to Nexus!"
+
+    # 6️⃣ Deploy WAR to Tomcat
+    - name: 🚀 Deploy WAR to Tomcat
+      env:
+        TOMCAT_USER: ${{ secrets.TOMCAT_USER }}
+        TOMCAT_PASS: ${{ secrets.TOMCAT_PASS }}
+        NEXUS_USER: ${{ secrets.NEXUS_USER }}
+        NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
+      run: |
+        set -e
+        cd /tmp; rm -f *.war
+
+        echo "🔍 Fetching latest WAR from Nexus..."
+        DOWNLOAD_URL=$(curl -s -u ${NEXUS_USER}:${NEXUS_PASS} \
+          "${{ env.NEXUS_URL }}/service/rest/v1/search?repository=${{ env.NEXUS_REPO }}&group=com.web.cal&name=webapp-add" \
+          | grep -oP '"downloadUrl"\\s*:\\s*"\\K[^"]+\\.war' | tail -1)
+
+        if [[ -z "$DOWNLOAD_URL" ]]; then
+          echo "❌ No WAR found in Nexus!"
+          exit 1
+        fi
+
+        echo "⬇️ Downloading WAR: $DOWNLOAD_URL"
+        curl -u ${NEXUS_USER}:${NEXUS_PASS} -O "$DOWNLOAD_URL"
+        WAR_FILE=$(basename "$DOWNLOAD_URL")
+        APP_NAME=$(echo "$WAR_FILE" | sed 's/-[0-9].*//')
+
+        echo "🧹 Removing old deployment..."
+        curl -u ${TOMCAT_USER}:${TOMCAT_PASS} "${{ env.TOMCAT_URL }}/undeploy?path=/${APP_NAME}" || true
+
+        echo "🚀 Deploying new WAR to Tomcat..."
+        curl -u ${TOMCAT_USER}:${TOMCAT_PASS} --upload-file "$WAR_FILE" \
+          "${{ env.TOMCAT_URL }}/deploy?path=/${APP_NAME}&update=true"
+
+        echo "✅ Deployment successful! Application updated."
+
+    # 7️⃣ Optional: Verify App Health
+    - name: 🔎 Verify Deployment
+      run: |
+        sleep 10
+        STATUS=$(curl -o /dev/null -s -w "%{http_code}" http://18.216.0.11:8080/webapp-add/)
+        if [ "$STATUS" -eq 200 ]; then
+          echo "✅ App is live!"
+        else
+          echo "⚠️ App returned status $STATUS"
+          exit 1
+        fi
