@@ -1,45 +1,39 @@
 pipeline {
-    agent { label 'SonarNode' } // Main build/test/analysis runs on Sonar node
+    agent { label 'SonarQube' }
 
     tools {
-        jdk 'JDK17'      // Matches JDK name in Jenkins Global Tool Configuration
-        maven 'Maven'    // Matches Maven name in Jenkins Global Tool Configuration
+        jdk 'JDK17'
+        maven 'Maven'
     }
 
     environment {
         SONARQUBE_SERVER = 'SonarQube'
-        JAVA_HOME = '/usr/lib/jvm/java-17-openjdk-amd64'
-        PATH = "${JAVA_HOME}/bin:${env.PATH}"
-        NEXUS_URL = 'http://3.227.246.21:8081/repository/maven-releases/'
-        NEXUS_REPO_ID = 'maven-releases'
-        MVN_SETTINGS = '/home/jenkins/.m2/settings.xml'
+        MVN_SETTINGS = '/etc/maven/settings.xml'
+        NEXUS_URL = 'http://18.226.34.227:8081'
+        NEXUS_REPO = 'maven-releases'
+        NEXUS_GROUP = 'com/web/cal'
+        NEXUS_ARTIFACT = 'webapp-add'
+        TOMCAT_URL = 'http://18.216.0.11:8080/manager/text'
     }
 
     stages {
-
         /* === Stage 1: Checkout Code === */
         stage('Checkout Code') {
             steps {
                 echo '📦 Cloning source from GitHub...'
                 checkout([$class: 'GitSCM',
                     branches: [[name: '*/main']],
-                    userRemoteConfigs: [[
-                        url: 'https://github.com/mrtechreddy/Java-Web-Calculator-App.git'
-                    ]]
+                    userRemoteConfigs: [[url: 'https://github.com/mrtechreddy/Java-Web-Calculator-App.git']]
                 ])
             }
         }
 
-        /* === Stage 2: SonarQube Code Analysis === */
-        stage('SonarQube Code Analysis') {
+        /* === Stage 2: SonarQube Analysis === */
+        stage('SonarQube Analysis') {
             steps {
                 echo '🔍 Running SonarQube static analysis...'
                 withSonarQubeEnv("${SONARQUBE_SERVER}") {
-                    sh '''
-                        echo "JAVA_HOME=$JAVA_HOME"
-                        java -version
-                        mvn clean verify sonar:sonar -DskipTests --settings ${MVN_SETTINGS}
-                    '''
+                    sh 'mvn clean verify sonar:sonar -DskipTests --settings ${MVN_SETTINGS}'
                 }
             }
         }
@@ -47,87 +41,77 @@ pipeline {
         /* === Stage 3: Build Artifact === */
         stage('Build Artifact') {
             steps {
-                echo '⚙️ Building the application WAR...'
-                sh '''
-                    mvn package -DskipTests --settings ${MVN_SETTINGS}
-                    echo "✅ Build complete. WAR files:"
-                    ls -lh target/*.war
-                '''
+                echo '⚙️ Building WAR...'
+                sh 'mvn clean package -DskipTests --settings ${MVN_SETTINGS}'
+                sh 'echo ✅ Build Completed!'
+                sh 'ls -lh target/*.war || true'
             }
         }
 
-        /* === Stage 4: Upload Artifact to Nexus (Auto Version Bump) === */
+        /* === Stage 4: Upload Artifact to Nexus (via REST API) === */
         stage('Upload Artifact to Nexus') {
             steps {
-                echo '⬆️ Uploading built artifact to Nexus repository...'
-                sh '''
-                    NEW_VERSION="0.0.${BUILD_NUMBER}"
-                    echo "🔢 Setting project version to ${NEW_VERSION}"
-                    mvn versions:set -DnewVersion=${NEW_VERSION} --settings ${MVN_SETTINGS}
+                withCredentials([usernamePassword(credentialsId: 'Nexus', usernameVariable: 'NEXUS_USR', passwordVariable: 'NEXUS_PSW')]) {
+                    sh '''#!/bin/bash
+                        set -e
+                        WAR_FILE=$(ls target/*.war | head -1)
+                        FILE_NAME=$(basename "$WAR_FILE")
+                        VERSION="0.0.${BUILD_NUMBER}"
 
-                    echo "🚀 Deploying version ${NEW_VERSION} to Nexus..."
-                    mvn deploy -DskipTests --settings ${MVN_SETTINGS}
+                        echo "📤 Uploading $FILE_NAME to Nexus as version $VERSION..."
 
-                    echo "✅ Artifact successfully uploaded as version ${NEW_VERSION}"
-                '''
+                        curl -v -u ${NEXUS_USR}:${NEXUS_PSW} --upload-file "$WAR_FILE" \
+                          "${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_GROUP}/${NEXUS_ARTIFACT}/${VERSION}/${NEXUS_ARTIFACT}-${VERSION}.war"
+
+                        echo "✅ Artifact uploaded successfully to Nexus!"
+                    '''
+                }
             }
         }
 
         /* === Stage 5: Deploy to Tomcat === */
         stage('Deploy to Tomcat') {
-            agent { label 'TomcatNode' } // Switch execution to Tomcat node
+            agent { label 'Tomcat' }
             steps {
-                echo '🚀 Deploying latest WAR from Nexus to Tomcat...'
                 withCredentials([
-                    usernamePassword(credentialsId: 'nexus-creds', usernameVariable: 'NEXUS_USR', passwordVariable: 'NEXUS_PSW'),
-                    usernamePassword(credentialsId: 'tomcat-manager', usernameVariable: 'TOMCAT_USR', passwordVariable: 'TOMCAT_PSW')
+                    usernamePassword(credentialsId: 'Nexus', usernameVariable: 'NEXUS_USR', passwordVariable: 'NEXUS_PSW'),
+                    usernamePassword(credentialsId: 'Tomcat', usernameVariable: 'TOMCAT_USR', passwordVariable: 'TOMCAT_PSW')
                 ]) {
-                    sh '''
-                        cd /tmp
-                        echo "🧹 Cleaning up old WARs..."
-                        rm -f *.war
+                    sh '''#!/bin/bash
+                        set -e
+                        cd /tmp; rm -f *.war
 
-                        echo "📥 Fetching latest WAR metadata from Nexus..."
+                        echo "🔍 Fetching latest WAR from Nexus..."
                         DOWNLOAD_URL=$(curl -s -u ${NEXUS_USR}:${NEXUS_PSW} \
-                            "http://3.227.246.21:8081/service/rest/v1/search?repository=maven-releases&group=com.web.cal&name=webapp-add" \
+                            "${NEXUS_URL}/service/rest/v1/search?repository=${NEXUS_REPO}&group=com.web.cal&name=webapp-add" \
                             | grep -oP '"downloadUrl"\\s*:\\s*"\\K[^"]+\\.war' | grep -vE '\\.md5|\\.sha1' | tail -1)
 
-                        if [ -z "$DOWNLOAD_URL" ]; then
-                            echo "❌ No WAR found in Nexus via REST API. Check your repository or groupId/artifactId."
+                        if [[ -z "$DOWNLOAD_URL" ]]; then
+                            echo "❌ No WAR found in Nexus!"
                             exit 1
                         fi
 
-                        echo "✅ Found WAR in Nexus:"
-                        echo "$DOWNLOAD_URL"
+                        echo "⬇️ Downloading WAR: $DOWNLOAD_URL"
+                        curl -u ${NEXUS_USR}:${NEXUS_PSW} -O "$DOWNLOAD_URL"
+                        WAR_FILE=$(basename "$DOWNLOAD_URL")
+                        APP_NAME=$(echo "$WAR_FILE" | sed 's/-[0-9].*//')
 
-                        echo "⬇️ Downloading artifact..."
-                        curl -u ${NEXUS_USR}:${NEXUS_PSW} -O $DOWNLOAD_URL
+                        echo "🧹 Removing old deployment..."
+                        curl -u ${TOMCAT_USR}:${TOMCAT_PSW} "${TOMCAT_URL}/undeploy?path=/${APP_NAME}" || true
 
-                        WAR_FILE=$(basename $DOWNLOAD_URL)
-                        echo "📦 Downloaded WAR: $WAR_FILE"
+                        echo "🚀 Deploying new WAR to Tomcat..."
+                        curl -u ${TOMCAT_USR}:${TOMCAT_PSW} --upload-file "$WAR_FILE" \
+                            "${TOMCAT_URL}/deploy?path=/${APP_NAME}&update=true"
 
-                        # Extract artifact name for Tomcat context (e.g., webapp-add)
-                        APP_NAME=$(echo ${WAR_FILE} | sed 's/-[0-9].*//')
-                        echo "🧩 Deploying as Tomcat context: /${APP_NAME}"
-
-                        echo "🚀 Deploying WAR to Tomcat at http://13.220.167.254:8080/manager/text ..."
-                        curl -u ${TOMCAT_USR}:${TOMCAT_PSW} --upload-file ${WAR_FILE} \
-                             "http://13.220.167.254:8080/manager/text/deploy?path=/${APP_NAME}&update=true"
-
-                        echo "✅ Deployment completed successfully for context /${APP_NAME}"
+                        echo "✅ Deployment successful! Application updated."
                     '''
                 }
             }
         }
     }
 
-    /* === Stage 6: Post Actions === */
     post {
-        success {
-            echo '🎉 CI/CD Pipeline completed successfully — Code analyzed, built, versioned, published to Nexus, and deployed to Tomcat!'
-        }
-        failure {
-            echo '❌ Pipeline failed. Please review Jenkins console logs for error details.'
-        }
+        success { echo '🎉 Pipeline completed successfully — Application live on Tomcat!' }
+        failure { echo '❌ Pipeline failed — Check Jenkins logs.' }
     }
 }
