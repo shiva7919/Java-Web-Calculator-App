@@ -9,7 +9,7 @@ pipeline {
     environment {
         SONARQUBE_SERVER = 'sonar'
         MVN_SETTINGS = '/etc/maven/settings.xml'
-        NEXUS_URL = 'http://54.226.123.114:8081'
+        NEXUS_URL = 'http://34.233.124.245:8081'
         NEXUS_REPO = 'maven-releases'
         NEXUS_GROUP = 'com/web/cal'
         NEXUS_ARTIFACT = 'webapp-add'
