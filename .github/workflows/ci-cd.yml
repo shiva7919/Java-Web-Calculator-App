@@ -87,8 +87,9 @@ jobs:
 
         echo "🔍 Fetching latest WAR from Nexus..."
         DOWNLOAD_URL=$(curl -s -u ${NEXUS_USER}:${NEXUS_PASS} \
-          "${{ env.NEXUS_URL }}/service/rest/v1/search?repository=${{ env.NEXUS_REPO }}&group=com.web.cal&name=webapp-add" \
-          | grep -oP '"downloadUrl"\\s*:\\s*"\\K[^"]+\\.war' | tail -1)
+          "${{ env.NEXUS_URL }}/service/rest/v1/search/assets?repository=${{ env.NEXUS_REPO }}" \
+          | grep -oP '"downloadUrl"\s*:\s*"[^"]*webapp-add-[0-9.]+\.war' \
+          | tail -1 | cut -d'"' -f4)
 
         if [[ -z "$DOWNLOAD_URL" ]]; then
           echo "❌ No WAR found in Nexus!"
