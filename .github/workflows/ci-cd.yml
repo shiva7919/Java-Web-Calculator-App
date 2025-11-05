@@ -48,7 +48,7 @@ jobs:
       - name: Build WAR File
         run: |
           mvn clean package -DskipTests
-          echo "Build completed!"
+          echo "✅ Build completed!"
           ls -lh target/*.war
 
       - name: Upload Artifact to Nexus
@@ -59,10 +59,10 @@ jobs:
           set -e
           WAR_FILE=$(ls target/*.war | head -1)
           VERSION="0.0.${{ github.run_number }}"
-          echo "Uploading WAR to Nexus version $VERSION ..."
+          echo "📤 Uploading WAR to Nexus version $VERSION ..."
           curl -u ${NEXUS_USER}:${NEXUS_PASS} --upload-file "$WAR_FILE" \
             "${{ env.NEXUS_URL }}/repository/${{ env.NEXUS_REPO }}/${{ env.NEXUS_GROUP }}/${{ env.NEXUS_ARTIFACT }}/${VERSION}/${{ env.NEXUS_ARTIFACT }}-${VERSION}.war"
-          echo "Upload successful."
+          echo "✅ Uploaded successfully."
 
       - name: Setup SSH Access to Tomcat Server
         run: |
@@ -82,44 +82,44 @@ jobs:
           cd /tmp
           rm -f *.war
 
-          echo "Fetching latest WAR from Nexus..."
+          echo "🔍 Fetching latest WAR from Nexus..."
           DOWNLOAD_URL=$(curl -s -u ${NEXUS_USER}:${NEXUS_PASS} \
             "${{ env.NEXUS_URL }}/service/rest/v1/search/assets?repository=${{ env.NEXUS_REPO }}" \
             | grep -oP '"downloadUrl"\s*:\s*"[^"]*webapp-add-[0-9.]+\.war' | tail -1 | cut -d'"' -f4)
 
           if [[ -z "$DOWNLOAD_URL" ]]; then
-            echo "No WAR found in Nexus!"
+            echo "❌ No WAR found in Nexus!"
             exit 1
           fi
 
-          echo "Downloading WAR: $DOWNLOAD_URL"
+          echo "⬇️ Downloading WAR: $DOWNLOAD_URL"
           curl -u ${NEXUS_USER}:${NEXUS_PASS} -O "$DOWNLOAD_URL"
           WAR_FILE=$(basename "$DOWNLOAD_URL")
           APP_NAME=$(echo "$WAR_FILE" | sed 's/-[0-9].*//')
 
-          echo "Cleaning old deployment..."
-          ssh -o StrictHostKeyChecking=no ubuntu@18.216.0.11 <<EOF
-            sudo systemctl stop tomcat || true
-            rm -rf /home/ubuntu/apache-tomcat-9.0.111/webapps/${APP_NAME}
-            rm -f /home/ubuntu/apache-tomcat-9.0.111/webapps/${APP_NAME}.war
+          echo "🧹 Cleaning old deployment on remote Tomcat..."
+          ssh -o StrictHostKeyChecking=no ubuntu@18.216.0.11 "
+            sudo systemctl stop tomcat || true &&
+            rm -rf /home/ubuntu/apache-tomcat-9.0.111/webapps/${APP_NAME} &&
+            rm -f /home/ubuntu/apache-tomcat-9.0.111/webapps/${APP_NAME}.war &&
             sudo systemctl start tomcat
-EOF
+          "
 
-          echo "Deploying new WAR..."
+          echo "🚀 Deploying new WAR..."
           curl -u ${TOMCAT_USER}:${TOMCAT_PASS} --upload-file "$WAR_FILE" \
             "${{ env.TOMCAT_URL }}/deploy?path=/${APP_NAME}&update=true"
 
-          echo "Restarting Tomcat..."
+          echo "✅ Restarting Tomcat remotely..."
           ssh -o StrictHostKeyChecking=no ubuntu@18.216.0.11 "sudo systemctl restart tomcat"
-          echo "Deployment complete!"
+          echo "🔥 Deployment complete!"
 
       - name: Verify Deployment
         run: |
           sleep 10
           STATUS=$(curl -o /dev/null -s -w "%{http_code}" http://18.216.0.11:8080/webapp-add/)
           if [ "$STATUS" -eq 200 ]; then
-            echo "App is live with latest changes!"
+            echo "✅ App is live with latest changes!"
           else
-            echo "App returned status $STATUS"
+            echo "⚠️ App returned status $STATUS"
             exit 1
           fi
